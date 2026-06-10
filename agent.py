@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import re
 import sys
 import time
@@ -369,16 +370,10 @@ def extract_jobs_from_recommended(page: Page) -> list[dict]:
     return jobs
 
 
-def run_recommended_feed(
-    context: BrowserContext,
-    config: dict,
-    logger: ApplicationLogger,
-    resume_path: Path,
-) -> int:
+def collect_recommended_jobs(context: BrowserContext, config: dict) -> list[dict]:
     if not config["settings"].get("use_recommended_feed", True):
-        return 0
+        return []
 
-    applied_count = 0
     page = context.new_page()
     try:
         page.goto(
@@ -388,18 +383,19 @@ def run_recommended_feed(
         )
         page.wait_for_timeout(3000)
         dismiss_naukri_modals(page)
-        jobs = extract_jobs_from_recommended(page)
-        print(f"Found {len(jobs)} jobs on recommended feed", flush=True)
-        for job in jobs:
-            before = len(logger.applied)
-            process_job(context, job, config, logger, resume_path)
-            if len(logger.applied) > before:
-                applied_count += 1
+        return extract_jobs_from_recommended(page)
     except Exception as exc:
         print(f"Recommended feed failed: {exc}", flush=True)
+        return []
     finally:
         page.close()
-    return applied_count
+
+
+def merge_jobs(queue: dict[str, dict], jobs: list[dict]) -> None:
+    for job in jobs:
+        key = job.get("job_id") or job.get("url", "")
+        if key and key not in queue:
+            queue[key] = job
 
 
 def extract_job_details(page: Page) -> dict:
@@ -581,15 +577,16 @@ def process_job(
     config: dict,
     logger: ApplicationLogger,
     resume_path: Path,
-) -> None:
+    dry_run: bool = False,
+) -> str | None:
     if logger.is_duplicate(job["job_id"], job["company"], job["title"]):
         print(f"[duplicate] {job.get('title')} @ {job.get('company')}", flush=True)
-        return
+        return None
 
     early_skip = should_skip_job_early(job, config)
     if early_skip:
         print(f"[early_skip:{early_skip}] {job.get('title')} @ {job.get('company')}", flush=True)
-        return
+        return None
 
     preview_score = calculate_match_score(job, config, preview=True)
     if not should_apply_to_job(job, config, preview=True):
@@ -602,7 +599,19 @@ def process_job(
             job_id=job.get("job_id", ""),
         )
         print(f"[skipped_low_match_{preview_score}] {preview_score}% | {job.get('title')} @ {job.get('company')}", flush=True)
-        return
+        return None
+
+    if dry_run:
+        logger.log_application(
+            company=job.get("company", ""),
+            role=job.get("title", ""),
+            link=job.get("url", ""),
+            status=f"dry_run_{preview_score}",
+            match_score=preview_score,
+            job_id=job.get("job_id", ""),
+        )
+        print(f"[dry_run] {preview_score}% | {job.get('title')} @ {job.get('company')}", flush=True)
+        return "dry_run"
 
     job_page = context.new_page()
     status = "failed"
@@ -639,13 +648,23 @@ def process_job(
         )
         print(f"[{status}] {match_score}% | {job.get('title')} @ {job.get('company')}", flush=True)
         job_page.close()
+    return status
 
 
-def run_search_cycle(context: BrowserContext, config: dict, logger: ApplicationLogger, resume_path: Path) -> int:
-    applied_count = run_recommended_feed(context, config, logger, resume_path)
+def run_search_cycle(
+    context: BrowserContext,
+    config: dict,
+    logger: ApplicationLogger,
+    resume_path: Path,
+    dry_run: bool = False,
+) -> dict[str, int]:
+    queue: dict[str, dict] = {}
+    recommended = collect_recommended_jobs(context, config)
+    print(f"Found {len(recommended)} jobs on recommended feed", flush=True)
+    merge_jobs(queue, recommended)
+
     locations = config["locations"]
     roles = config["target_roles"]
-
     for role in roles:
         for location in locations:
             page = context.new_page()
@@ -653,16 +672,40 @@ def run_search_cycle(context: BrowserContext, config: dict, logger: ApplicationL
                 run_filtered_search(page, role, location, config)
                 jobs = extract_jobs_from_listing(page)
                 print(f"Found {len(jobs)} jobs for '{role}' in '{location}' (filtered)", flush=True)
-                for job in jobs:
-                    before = len(logger.applied)
-                    process_job(context, job, config, logger, resume_path)
-                    if len(logger.applied) > before:
-                        applied_count += 1
+                merge_jobs(queue, jobs)
             except Exception as exc:
                 print(f"Search failed for {role}/{location}: {exc}", flush=True)
             finally:
                 page.close()
-    return applied_count
+
+    ranked = sorted(
+        queue.values(),
+        key=lambda j: calculate_match_score(j, config, preview=True),
+        reverse=True,
+    )
+    print(f"Collected {len(ranked)} unique jobs — highest match scores first", flush=True)
+
+    settings = config["settings"]
+    max_applies = settings.get("max_applies_per_cycle", 120)
+    delay_range = settings.get("apply_delay_seconds", [3, 8])
+    delay_min = delay_range[0] if len(delay_range) > 0 else 3
+    delay_max = delay_range[1] if len(delay_range) > 1 else 8
+
+    stats = {"found": len(ranked), "applied": 0, "dry_run": 0}
+    for index, job in enumerate(ranked):
+        if not dry_run and stats["applied"] >= max_applies:
+            print(f"Per-cycle apply cap reached ({max_applies})", flush=True)
+            break
+
+        result = process_job(context, job, config, logger, resume_path, dry_run=dry_run)
+        if result == "applied":
+            stats["applied"] += 1
+            if index + 1 < len(ranked):
+                time.sleep(random.uniform(delay_min, delay_max))
+        elif result == "dry_run":
+            stats["dry_run"] += 1
+
+    return stats
 
 
 def create_browser_context(p: Playwright, config: dict) -> BrowserContext:
@@ -712,6 +755,11 @@ def main() -> int:
         action="store_true",
         help="Refresh Naukri profile/resume visibility and exit",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Search and score jobs without submitting applications",
+    )
     args = parser.parse_args()
 
     config = load_config()
@@ -758,10 +806,23 @@ def main() -> int:
                 refresh_profile_visibility(page, config, resume_path, DATA_DIR)
 
             cycle_start = datetime.now()
-            count = run_search_cycle(context, config, logger, resume_path)
+            stats = run_search_cycle(
+                context, config, logger, resume_path, dry_run=args.dry_run
+            )
             elapsed = datetime.now() - cycle_start
             total_today = len(logger.applied)
-            print(f"Cycle complete: {count} new applications | Total tracked: {total_today} | Elapsed: {elapsed}")
+            if args.dry_run:
+                print(
+                    f"Cycle complete (dry run): {stats['dry_run']} would apply | "
+                    f"{stats['found']} found | Elapsed: {elapsed}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"Cycle complete: {stats['applied']} applied | "
+                    f"{stats['found']} found | Total tracked: {total_today} | Elapsed: {elapsed}",
+                    flush=True,
+                )
 
             if args.once:
                 break
