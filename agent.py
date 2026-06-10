@@ -52,21 +52,61 @@ def slugify_role(role: str) -> str:
     return slug.strip("-")
 
 
-def build_search_url(role: str, location: str, config: dict) -> str:
+def prepare_locations(locations: list[str]) -> tuple[list[str], bool]:
+    """Deduplicate cities (Bangalore/Bengaluru) and detect Remote preference."""
+    cities: list[str] = []
+    seen: set[str] = set()
+    include_remote = False
+    for loc in locations:
+        low = loc.lower().strip()
+        if low == "remote":
+            include_remote = True
+            continue
+        if low in ("bangalore", "bengaluru"):
+            key = "bangalore"
+            label = "Bengaluru"
+        else:
+            key = low
+            label = loc.strip()
+        if key not in seen:
+            seen.add(key)
+            cities.append(label)
+    return cities, include_remote
+
+
+def locations_label(config: dict) -> str:
+    cities, remote = prepare_locations(config.get("locations", []))
+    parts = list(cities)
+    if remote:
+        parts.append("Remote")
+    return ", ".join(parts) if parts else "India"
+
+
+def build_role_search_url(role: str, config: dict) -> str:
+    """One search URL per role with all locations combined (not one URL per city)."""
     role_slug = slugify_role(role)
     exp = config["filters"].get("candidate_experience_years", 1)
     max_days = config["filters"]["max_posting_days"]
     job_age = 1 if max_days <= 1 else (3 if max_days <= 3 else 7)
-    if location.lower() == "remote":
-        return (
-            f"https://www.naukri.com/{role_slug}-jobs"
-            f"?k={quote_plus(role)}&experience={exp}&jobAge={job_age}&qWfhType=2"
-        )
-    loc_slug = slugify_role(location)
-    return (
-        f"https://www.naukri.com/{role_slug}-jobs-in-{loc_slug}"
-        f"?k={quote_plus(role)}&experience={exp}&jobAge={job_age}"
-    )
+    cities, include_remote = prepare_locations(config.get("locations", []))
+
+    params = [
+        f"k={quote_plus(role)}",
+        f"experience={exp}",
+        f"jobAge={job_age}",
+    ]
+    if cities:
+        params.append("location=" + ",".join(quote_plus(c) for c in cities))
+    if include_remote:
+        params.append("qWfhType=2")
+
+    if len(cities) == 1:
+        loc_slug = slugify_role(cities[0])
+        base = f"https://www.naukri.com/{role_slug}-jobs-in-{loc_slug}"
+    else:
+        base = f"https://www.naukri.com/{role_slug}-jobs"
+
+    return f"{base}?{'&'.join(params)}"
 
 
 def safe_card_text(card, selectors: str, default: str = "") -> str:
@@ -185,18 +225,67 @@ def set_experience_filter(page: Page, config: dict) -> None:
                 return
 
 
-def apply_srp_filters(page: Page, config: dict) -> None:
+def set_location_filters(page: Page, config: dict) -> list[str]:
+    """Select multiple cities + remote on Naukri SRP in one pass."""
+    cities, include_remote = prepare_locations(config.get("locations", []))
+    applied: list[str] = []
+
+    if cities:
+        opened = open_filter_section(page, "Location") or open_filter_section(page, "City")
+        if opened:
+            for city in cities:
+                clicked = False
+                for variant in (city, "Bangalore" if city == "Bengaluru" else city):
+                    if click_filter_option(page, variant):
+                        applied.append(variant)
+                        clicked = True
+                        break
+                if not clicked:
+                    applied.append(city)
+
+        if len(cities) > 1:
+            loc_box = page.locator(
+                "input[placeholder*='location' i], .nI-gNb-sb__loc input, #qsbLocation"
+            )
+            if loc_box.count():
+                try:
+                    loc_box.first.click(force=True)
+                    loc_box.first.fill(", ".join(cities))
+                    page.wait_for_timeout(1000)
+                    for city in cities:
+                        suggestion = page.locator(
+                            f"span:has-text('{city}'), li:has-text('{city}'), div:has-text('{city}')"
+                        )
+                        if suggestion.count():
+                            suggestion.first.click(force=True)
+                            page.wait_for_timeout(400)
+                except Exception:
+                    pass
+
+    if include_remote:
+        for section in ("Work mode", "Work Mode", "WFH"):
+            if open_filter_section(page, section):
+                break
+        for label in ("Remote", "Work from home", "WFH"):
+            if click_filter_option(page, label):
+                applied.append("Remote")
+                break
+
+    return applied
+
+
+def apply_srp_filters(page: Page, config: dict) -> list[str]:
     freshness_labels = config["filters"].get(
         "freshness_options",
         ["Last 1 day", "Last 3 days", "Last 7 days"],
     )
 
     set_experience_filter(page, config)
+    applied_locations = set_location_filters(page, config)
 
     if open_filter_section(page, "Freshness"):
         for label in freshness_labels:
             if click_filter_option(page, label):
-                print(f"Applied freshness filter: {label}", flush=True)
                 break
 
     sort_by = page.locator("text=Sort by")
@@ -210,6 +299,8 @@ def apply_srp_filters(page: Page, config: dict) -> None:
         except Exception:
             pass
 
+    return applied_locations
+
 
 def scroll_job_listings(page: Page, scrolls: int = 3) -> None:
     for _ in range(scrolls):
@@ -220,13 +311,14 @@ def scroll_job_listings(page: Page, scrolls: int = 3) -> None:
             break
 
 
-def run_filtered_search(page: Page, role: str, location: str, config: dict) -> None:
-    search_url = build_search_url(role, location, config)
+def run_filtered_search(page: Page, role: str, config: dict) -> list[str]:
+    search_url = build_role_search_url(role, config)
     page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
-    page.wait_for_timeout(3000)
+    page.wait_for_timeout(2000)
     dismiss_naukri_modals(page)
-    apply_srp_filters(page, config)
+    applied_locations = apply_srp_filters(page, config)
     scroll_job_listings(page, scrolls=config.get("settings", {}).get("listing_scrolls", 3))
+    return applied_locations
 
 
 def is_logged_in(page: Page) -> bool:
@@ -370,19 +462,65 @@ def extract_jobs_from_listing(page: Page, config: dict | None = None) -> list[di
     return jobs
 
 
-def extract_jobs_from_recommended(page: Page) -> list[dict]:
-    """Parse Naukri's recommended-jobs feed (profile-matched listings)."""
+def extract_jobs_from_link_fallback(page: Page, limit: int = 40) -> list[dict]:
+    """Fallback when card wrappers are missing (common on recommended-jobs page)."""
     jobs: list[dict] = []
-    cards = page.locator("article.jobTuple, .jobTuple, .srp-jobtuple-wrapper, .cust-job-tuple")
-    for i in range(min(cards.count(), 40)):
+    seen: set[str] = set()
+    links = page.locator("a[href*='job-listings'], a[href*='job-details']")
+    for i in range(min(links.count(), limit * 2)):
+        link = links.nth(i)
         try:
-            card = cards.nth(i)
-            card.scroll_into_view_if_needed(timeout=2000)
+            href = link.get_attribute("href") or ""
+            if not href or href in seen:
+                continue
+            title = link.inner_text(timeout=1500).strip()
+            if len(title) < 4 or title.lower() in ("view all", "apply", "save"):
+                continue
+            seen.add(href)
+            url = href if href.startswith("http") else f"https://www.naukri.com{href}"
+            jobs.append({
+                "title": title,
+                "company": "",
+                "location": "",
+                "experience": "",
+                "salary": "",
+                "posted": "",
+                "url": url,
+                "job_id": job_id_from_href(href),
+                "description": "",
+                "listing_snippet": "",
+                "skills": "",
+            })
+            if len(jobs) >= limit:
+                break
+        except Exception:
+            continue
+    return jobs
+
+
+def extract_jobs_from_recommended(page: Page, config: dict | None = None) -> list[dict]:
+    """Parse Naukri's recommended-jobs feed (profile-matched listings)."""
+    limit = 40
+    if config:
+        limit = config.get("settings", {}).get("jobs_per_search", 40)
+
+    scroll_job_listings(page, scrolls=4)
+    jobs: list[dict] = []
+    cards = page.locator(
+        "article.jobTuple, .jobTuple, .srp-jobtuple-wrapper, .cust-job-tuple, "
+        "[class*='reco'] article, [class*='jobTuple']"
+    )
+    for i in range(min(cards.count(), limit)):
+        try:
+            cards.nth(i).scroll_into_view_if_needed(timeout=2000)
         except Exception:
             pass
         job = extract_job_card(cards.nth(i), srp_urls_only=False)
         if job:
             jobs.append(job)
+
+    if not jobs:
+        jobs = extract_jobs_from_link_fallback(page, limit=limit)
     return jobs
 
 
@@ -399,7 +537,7 @@ def collect_recommended_jobs(context: BrowserContext, config: dict) -> list[dict
         )
         page.wait_for_timeout(3000)
         dismiss_naukri_modals(page)
-        return extract_jobs_from_recommended(page)
+        return extract_jobs_from_recommended(page, config)
     except Exception as exc:
         print(f"Recommended feed failed: {exc}", flush=True)
         return []
@@ -491,19 +629,15 @@ def fill_screening_questions(page: Page, config: dict) -> None:
             continue
 
 
-def locate_apply_button(page: Page):
-    apply_selectors = [
-        "button:has-text('Easy Apply')",
+def locate_company_site_button(page: Page):
+    selectors = [
         "button:has-text('Apply on company site')",
-        "button:has-text('Apply')",
-        "a:has-text('Apply')",
-        ".apply-button",
-        "#apply-button",
+        "a:has-text('Apply on company site')",
         ".company-site-button",
-        "[class*='apply-button']",
         "[class*='company-site-button']",
+        "[class*='companySite']",
     ]
-    for sel in apply_selectors:
+    for sel in selectors:
         loc = page.locator(sel).filter(has_not_text="Applied")
         for i in range(min(loc.count(), 3)):
             btn = loc.nth(i)
@@ -515,45 +649,122 @@ def locate_apply_button(page: Page):
     return None
 
 
-def apply_to_job(page: Page, context: BrowserContext, config: dict, resume_path: Path) -> str:
+def locate_naukri_apply_button(page: Page):
+    """Easy Apply / in-Naukri apply only — not company-site redirects."""
+    apply_selectors = [
+        "button:has-text('Easy Apply')",
+        "button:has-text('Apply')",
+        "a:has-text('Apply')",
+        ".apply-button",
+        "#apply-button",
+        "[class*='apply-button']",
+    ]
+    for sel in apply_selectors:
+        loc = page.locator(sel).filter(has_not_text="Applied")
+        for i in range(min(loc.count(), 5)):
+            btn = loc.nth(i)
+            try:
+                if not btn.is_visible():
+                    continue
+                text = btn.inner_text(timeout=1000).lower()
+                if "company site" in text:
+                    continue
+                return btn
+            except Exception:
+                continue
+    return None
+
+
+def capture_company_site_url(page: Page, context: BrowserContext, btn) -> str:
+    """Get external apply URL without filling any company-site form."""
+    try:
+        url = btn.evaluate(
+            """(el) => {
+            const link = el.closest('a[href]');
+            if (link) {
+                const href = link.href || '';
+                if (href && !/naukri\\.com/i.test(href)) return href;
+            }
+            const direct = el.getAttribute('href')
+                || el.dataset.url
+                || el.dataset.href
+                || el.dataset.redirect
+                || '';
+            if (direct && !/naukri\\.com/i.test(direct)) return direct;
+            return '';
+        }"""
+        )
+        if url:
+            return url.strip()
+    except Exception:
+        pass
+
+    popup = None
+    try:
+        with context.expect_page(timeout=12000) as new_page_info:
+            btn.click(force=True, timeout=5000)
+        popup = new_page_info.value
+        popup.wait_for_load_state("domcontentloaded", timeout=15000)
+        popup.wait_for_timeout(1000)
+        captured = (popup.url or "").strip()
+        return captured
+    except Exception:
+        return ""
+    finally:
+        if popup is not None and not popup.is_closed():
+            try:
+                popup.close()
+            except Exception:
+                pass
+
+
+def apply_to_job(page: Page, context: BrowserContext, config: dict, resume_path: Path) -> tuple[str, str]:
     if page.locator("text=Applied").count() or page.locator("#already-applied").count():
-        return "already_applied"
+        return "already_applied", ""
+
     if is_job_unavailable(page):
-        return "job_unavailable"
+        return "job_unavailable", ""
 
     page.wait_for_timeout(1500)
-    apply_btn = locate_apply_button(page)
+
+    company_site_btn = locate_company_site_button(page)
+    if company_site_btn:
+        company_site_btn.scroll_into_view_if_needed()
+        company_url = capture_company_site_url(page, context, company_site_btn)
+        return "saved_for_manual", company_url
+
+    apply_btn = locate_naukri_apply_button(page)
     popup_page = page
 
     if apply_btn:
         apply_btn.scroll_into_view_if_needed()
-        btn_text = apply_btn.inner_text(timeout=2000).lower()
         try:
-            if "company site" in btn_text:
-                with context.expect_page(timeout=15000) as new_page_info:
-                    apply_btn.click(force=True, timeout=5000)
-                popup_page = new_page_info.value
-                popup_page.wait_for_load_state("domcontentloaded")
-                popup_page.wait_for_timeout(2500)
-            else:
-                apply_btn.click(force=True, timeout=5000)
-                page.wait_for_timeout(2000)
+            apply_btn.click(force=True, timeout=5000)
+            page.wait_for_timeout(2000)
         except PlaywrightTimeout:
             apply_btn.click(force=True, timeout=5000)
             page.wait_for_timeout(2000)
     else:
-        clicked = page.evaluate(
+        clicked_info = page.evaluate(
             """() => {
             const btn = [...document.querySelectorAll('button, a')]
               .find(el => /apply/i.test(el.innerText) && !/applied/i.test(el.innerText) && el.offsetParent);
-            if (!btn) return false;
+            if (!btn) return { clicked: false, companySite: false };
+            const companySite = /company\\s*site/i.test(btn.innerText || '');
+            if (companySite) return { clicked: false, companySite: true };
             btn.scrollIntoView({block: 'center'});
             btn.click();
-            return true;
+            return { clicked: true, companySite: false };
         }"""
         )
-        if not clicked:
-            return "no_apply_button"
+        if clicked_info.get("companySite"):
+            company_site_btn = locate_company_site_button(page)
+            if company_site_btn:
+                company_url = capture_company_site_url(page, context, company_site_btn)
+                return "saved_for_manual", company_url
+            return "saved_for_manual", ""
+        if not clicked_info.get("clicked"):
+            return "no_apply_button", ""
         page.wait_for_timeout(2000)
 
     target = popup_page
@@ -586,14 +797,13 @@ def apply_to_job(page: Page, context: BrowserContext, config: dict, resume_path:
     if is_application_complete(target) or is_application_complete(page):
         if popup_page is not page:
             popup_page.close()
-        return "applied"
+        return "applied", ""
 
     if popup_page is not page:
-        status = "external_redirect"
         popup_page.close()
-        return status
+        return "external_redirect", ""
 
-    return "attempted"
+    return "attempted", ""
 
 
 def process_job(
@@ -605,12 +815,12 @@ def process_job(
     dry_run: bool = False,
 ) -> str | None:
     if logger.is_duplicate(job["job_id"], job["company"], job["title"]):
-        print(f"[duplicate] {job.get('title')} @ {job.get('company')}", flush=True)
+        print(f"[skip:duplicate] {job.get('title')} @ {job.get('company')}", flush=True)
         return None
 
     early_skip = should_skip_job_early(job, config)
     if early_skip:
-        print(f"[early_skip:{early_skip}] {job.get('title')} @ {job.get('company')}", flush=True)
+        print(f"[skip:{early_skip}] {job.get('title')} @ {job.get('company')}", flush=True)
         return None
 
     preview_score = calculate_match_score(job, config, preview=True)
@@ -624,7 +834,7 @@ def process_job(
             job_id=job.get("job_id", ""),
             block_retry=False,
         )
-        print(f"[skipped_low_match_{preview_score}] {preview_score}% | {job.get('title')} @ {job.get('company')}", flush=True)
+        print(f"[skip:low_match_{preview_score}%] {job.get('title')} @ {job.get('company')}", flush=True)
         return None
 
     if dry_run:
@@ -640,6 +850,12 @@ def process_job(
         print(f"[dry_run] {preview_score}% | {job.get('title')} @ {job.get('company')}", flush=True)
         return "dry_run"
 
+    print(
+        f"[visit] {preview_score}% | {job.get('title')} @ {job.get('company')}\n"
+        f"        {job.get('url')}",
+        flush=True,
+    )
+
     job_page = context.new_page()
     status = "failed"
     match_score = preview_score
@@ -654,8 +870,23 @@ def process_job(
                 if not should_apply_to_job(job, config, preview=False):
                     status = f"skipped_low_match_{match_score}"
                     break
-                print(f"[applying] {match_score}% | {job.get('title')} @ {job.get('company')}", flush=True)
-                status = apply_to_job(job_page, context, config, resume_path)
+                print(f"[click-apply] {match_score}% | {job.get('title')} @ {job.get('company')}", flush=True)
+                status, company_site_url = apply_to_job(job_page, context, config, resume_path)
+                if status == "saved_for_manual":
+                    logger.log_manual_apply(
+                        company=job.get("company", ""),
+                        role=job.get("title", ""),
+                        naukri_link=job.get("url", ""),
+                        company_site_url=company_site_url,
+                        match_score=match_score,
+                        job_id=job.get("job_id", ""),
+                    )
+                    print(
+                        f"[manual] company-site apply saved → data/manual_apply_queue.csv\n"
+                        f"         site: {company_site_url or '(open from Naukri link)'}",
+                        flush=True,
+                    )
+                    break
                 if status in ("applied", "already_applied", "external_redirect", "attempted"):
                     break
             except PlaywrightTimeout:
@@ -665,19 +896,82 @@ def process_job(
                 status = f"error_attempt_{attempt + 1}: {exc}"
                 job_page.wait_for_timeout(2000)
     finally:
-        block = status in ("applied", "already_applied", "external_redirect")
-        logger.log_application(
-            company=job.get("company", ""),
-            role=job.get("title", ""),
-            link=job.get("url", ""),
-            status=status,
-            match_score=match_score,
-            job_id=job.get("job_id", ""),
-            block_retry=block,
-        )
-        print(f"[{status}] {match_score}% | {job.get('title')} @ {job.get('company')}", flush=True)
+        if status != "saved_for_manual":
+            block = status in ("applied", "already_applied", "external_redirect")
+            logger.log_application(
+                company=job.get("company", ""),
+                role=job.get("title", ""),
+                link=job.get("url", ""),
+                status=status,
+                match_score=match_score,
+                job_id=job.get("job_id", ""),
+                block_retry=block,
+            )
+            print(f"[{status}] {match_score}% | {job.get('title')} @ {job.get('company')}", flush=True)
         job_page.close()
     return status
+
+
+def apply_jobs_immediately(
+    context: BrowserContext,
+    jobs: list[dict],
+    processed: set[str],
+    config: dict,
+    logger: ApplicationLogger,
+    resume_path: Path,
+    stats: dict[str, int],
+    dry_run: bool,
+    label: str,
+) -> int:
+    """Apply every qualifying job from this search result before the next search."""
+    settings = config["settings"]
+    max_applies = settings.get("max_applies_per_cycle", 120)
+    delay_range = settings.get("apply_delay_seconds", [3, 8])
+    delay_min = delay_range[0] if len(delay_range) > 0 else 3
+    delay_max = delay_range[1] if len(delay_range) > 1 else 8
+
+    if not dry_run and stats["applied"] >= max_applies:
+        return 0
+
+    pending = []
+    for job in jobs:
+        key = job.get("job_id") or job.get("url", "")
+        if key and key not in processed:
+            pending.append(job)
+
+    if not pending:
+        return 0
+
+    ranked = sorted(
+        pending,
+        key=lambda j: calculate_match_score(j, config, preview=True),
+        reverse=True,
+    )
+
+    print(
+        f"\n>>> APPLY NOW ({label}): {len(ranked)} jobs "
+        f"| applied so far: {stats['applied']}/{max_applies} <<<",
+        flush=True,
+    )
+
+    applied_count = 0
+    for job in ranked:
+        key = job.get("job_id") or job.get("url", "")
+        processed.add(key)
+
+        if not dry_run and stats["applied"] >= max_applies:
+            print(f"[apply] Per-cycle cap reached ({max_applies})", flush=True)
+            break
+
+        result = process_job(context, job, config, logger, resume_path, dry_run=dry_run)
+        if result == "applied":
+            stats["applied"] += 1
+            applied_count += 1
+            time.sleep(random.uniform(delay_min, delay_max))
+        elif result == "dry_run":
+            stats["dry_run"] += 1
+
+    return applied_count
 
 
 def run_search_cycle(
@@ -688,52 +982,96 @@ def run_search_cycle(
     dry_run: bool = False,
 ) -> dict[str, int]:
     queue: dict[str, dict] = {}
-    recommended = collect_recommended_jobs(context, config)
-    print(f"Found {len(recommended)} jobs on recommended feed", flush=True)
-    merge_jobs(queue, recommended)
-
-    locations = config["locations"]
-    roles = roles_for_cycle(config, DATA_DIR)
-    for role in roles:
-        for location in locations:
-            page = context.new_page()
-            try:
-                run_filtered_search(page, role, location, config)
-                jobs = extract_jobs_from_listing(page, config)
-                print(f"Found {len(jobs)} jobs for '{role}' in '{location}' (filtered)", flush=True)
-                merge_jobs(queue, jobs)
-            except Exception as exc:
-                print(f"Search failed for {role}/{location}: {exc}", flush=True)
-            finally:
-                page.close()
-
-    ranked = sorted(
-        queue.values(),
-        key=lambda j: calculate_match_score(j, config, preview=True),
-        reverse=True,
-    )
-    print(f"Collected {len(ranked)} unique jobs — highest match scores first", flush=True)
-
+    processed: set[str] = set()
     settings = config["settings"]
     max_applies = settings.get("max_applies_per_cycle", 120)
-    delay_range = settings.get("apply_delay_seconds", [3, 8])
-    delay_min = delay_range[0] if len(delay_range) > 0 else 3
-    delay_max = delay_range[1] if len(delay_range) > 1 else 8
 
-    stats = {"found": len(ranked), "applied": 0, "dry_run": 0}
-    for index, job in enumerate(ranked):
+    stats: dict[str, int] = {
+        "found": 0,
+        "applied": 0,
+        "dry_run": 0,
+        "searches": 0,
+    }
+
+    print("\n========== SEARCH → APPLY (one role at a time) ==========", flush=True)
+
+    loc_label = locations_label(config)
+    roles = roles_for_cycle(config, DATA_DIR)
+    total_searches = len(roles)
+
+    for search_num, role in enumerate(roles, start=1):
         if not dry_run and stats["applied"] >= max_applies:
-            print(f"Per-cycle apply cap reached ({max_applies})", flush=True)
+            print(f"\n[search] Apply cap reached — skipping remaining role searches", flush=True)
             break
 
-        result = process_job(context, job, config, logger, resume_path, dry_run=dry_run)
-        if result == "applied":
-            stats["applied"] += 1
-            if index + 1 < len(ranked):
-                time.sleep(random.uniform(delay_min, delay_max))
-        elif result == "dry_run":
-            stats["dry_run"] += 1
+        stats["searches"] += 1
+        page = context.new_page()
+        jobs: list[dict] = []
+        try:
+            print(
+                f"\n[search {search_num}/{total_searches}] {role}\n"
+                f"         locations: {loc_label}",
+                flush=True,
+            )
+            applied_locs = run_filtered_search(page, role, config)
+            freshness = config["filters"].get("freshness_options", ["Last 1 day"])[0]
+            print(
+                f"         filters: experience + {freshness} + locations "
+                f"({', '.join(applied_locs) if applied_locs else loc_label})",
+                flush=True,
+            )
+            jobs = extract_jobs_from_listing(page, config)
+            before = len(queue)
+            merge_jobs(queue, jobs)
+            print(
+                f"         listings: {len(jobs)} | new unique: {len(queue) - before} "
+                f"| queue total: {len(queue)}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"         search failed: {exc}", flush=True)
+        finally:
+            page.close()
 
+        stats["found"] = len(queue)
+        if jobs:
+            applied_here = apply_jobs_immediately(
+                context, jobs, processed, config, logger, resume_path, stats, dry_run,
+                role,
+            )
+            print(f"         applied from this search: {applied_here}", flush=True)
+
+    if config["settings"].get("use_recommended_feed", True):
+        if not dry_run and stats["applied"] < max_applies:
+            print("\n[bonus] recommended feed", flush=True)
+            recommended = collect_recommended_jobs(context, config)
+            merge_jobs(queue, recommended)
+            stats["found"] = len(queue)
+            print(f"         listings: {len(recommended)} | queue total: {len(queue)}", flush=True)
+            if recommended:
+                applied_here = apply_jobs_immediately(
+                    context, recommended, processed, config, logger, resume_path, stats, dry_run,
+                    "recommended feed",
+                )
+                print(f"         applied from recommended: {applied_here}", flush=True)
+
+    remaining = [job for key, job in queue.items() if key not in processed]
+    if remaining and (dry_run or stats["applied"] < max_applies):
+        print(f"\n[final] {len(remaining)} jobs not yet attempted", flush=True)
+        apply_jobs_immediately(
+            context, remaining, processed, config, logger, resume_path, stats, dry_run,
+            "remaining",
+        )
+
+    print(
+        f"\n========== CYCLE DONE ==========\n"
+        f"  Searches run : {stats['searches']}\n"
+        f"  Unique jobs  : {stats['found']}\n"
+        f"  Applied      : {stats['applied']}\n"
+        f"  Dry-run hits : {stats['dry_run']}\n"
+        f"================================",
+        flush=True,
+    )
     return stats
 
 

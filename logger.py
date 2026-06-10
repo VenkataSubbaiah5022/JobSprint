@@ -8,6 +8,7 @@ BLOCK_RETRY_STATUSES = frozenset({
     "applied",
     "already_applied",
     "external_redirect",
+    "saved_for_manual",
 })
 
 
@@ -17,8 +18,10 @@ class ApplicationLogger:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.applied_path = self.data_dir / "applied_jobs.json"
         self.csv_path = self.data_dir / "applications_log.csv"
+        self.manual_csv_path = self.data_dir / "manual_apply_queue.csv"
         self.applied = self._load_applied()
         self._ensure_csv_header()
+        self._ensure_manual_csv_header()
 
     def _load_applied(self) -> set[str]:
         if not self.applied_path.exists():
@@ -38,6 +41,21 @@ class ApplicationLogger:
         with self.csv_path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["Date", "Company", "Role", "Link", "Status", "Match Score"])
+
+    def _ensure_manual_csv_header(self) -> None:
+        if self.manual_csv_path.exists():
+            return
+        with self.manual_csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "Date",
+                "Company",
+                "Role",
+                "Naukri Link",
+                "Company Site URL",
+                "Match Score",
+                "Status",
+            ])
 
     def job_key(self, job_id: str, company: str, role: str) -> str:
         return f"{job_id}|{normalize_key(company)}|{normalize_key(role)}"
@@ -87,6 +105,43 @@ class ApplicationLogger:
                 status,
                 match_score,
             ])
+
+    def log_manual_apply(
+        self,
+        company: str,
+        role: str,
+        naukri_link: str,
+        company_site_url: str,
+        match_score: float,
+        job_id: str = "",
+    ) -> None:
+        """Save company-site jobs for you to apply manually (not auto-applied)."""
+        key = self.job_key(job_id, company, role)
+        self.applied.add(key)
+        self._save_applied()
+
+        row = [
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            company,
+            role,
+            naukri_link,
+            company_site_url,
+            match_score,
+            "pending_manual",
+        ]
+        with self.manual_csv_path.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(row)
+
+        self.log_application(
+            company=company,
+            role=role,
+            link=naukri_link,
+            status="saved_for_manual",
+            match_score=match_score,
+            job_id=job_id,
+            block_retry=True,
+        )
 
 
 def normalize_key(value: str) -> str:
