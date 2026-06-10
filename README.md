@@ -15,6 +15,7 @@ Autonomous Naukri job application agent. It searches fresh listings on [Naukri.c
 - Prevents duplicate applications
 - Logs every attempt to CSV
 - Refreshes searches every 15 minutes until stopped
+- Keeps Naukri profile and resume "updated today" for recruiter visibility (complements auto-apply)
 
 ## Prerequisites
 
@@ -67,6 +68,12 @@ python agent.py --once
 
 ```powershell
 python agent.py --login
+```
+
+**Profile visibility refresh** (bumps profile + re-uploads resume):
+
+```powershell
+python agent.py --refresh-profile
 ```
 
 Stop anytime with `Ctrl+C`.
@@ -136,6 +143,14 @@ Answers are resolved in order:
 
 Set your real phone in `screening_answers.phone` — many employers ask for it.
 
+## Profile visibility
+
+Recruiters often filter candidates by recently updated profiles. JobSprint can keep your Naukri profile and resume marked as updated today:
+
+- Re-saves basic profile details (e.g. phone) to bump your last-updated timestamp
+- Re-uploads your resume with a fresh PDF metadata stamp
+- Runs automatically every `profile_refresh_interval_hours` (default 24), or on demand with `--refresh-profile`
+
 ## Project structure
 
 ```
@@ -143,6 +158,7 @@ JobSprint/
 ├── agent.py           # Main agent loop
 ├── matcher.py         # Match scoring logic
 ├── questionnaire.py   # Chatbot Q&A (rules + optional AI)
+├── profile_refresh.py # Profile/resume visibility for recruiters
 ├── logger.py          # Duplicate tracking and CSV logging
 ├── config.json        # Profile and filter configuration (local, gitignored)
 ├── config.example.json

@@ -28,6 +28,8 @@ resume.docx
 # Agent runtime data
 data/applications_log.csv
 data/applied_jobs.json
+data/last_profile_refresh.txt
+data/resume_variants/
 browser_data/
 
 # Playwright

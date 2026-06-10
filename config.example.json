@@ -63,6 +63,9 @@
     "chrome_cdp_url": "http://localhost:9222",
     "chrome_user_data_dir": "C:\\Users\\YOUR_USER\\AppData\\Local\\Google\\Chrome\\User Data",
     "chrome_profile": "Default",
-    "gemini_api_key": ""
+    "gemini_api_key": "",
+    "profile_refresh_enabled": true,
+    "profile_refresh_interval_hours": 24,
+    "profile_refresh_touch_resume": true
   }
 }

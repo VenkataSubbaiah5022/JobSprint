@@ -22,6 +22,11 @@ from playwright.sync_api import (
 
 from logger import ApplicationLogger
 from matcher import calculate_match_score, should_apply_to_job
+from profile_refresh import (
+    dismiss_naukri_modals,
+    refresh_profile_visibility,
+    should_refresh_profile,
+)
 from questionnaire import (
     complete_application_questionnaire,
     is_application_complete,
@@ -632,6 +637,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Autonomous Naukri Job Application Agent")
     parser.add_argument("--login", action="store_true", help="Only perform login and exit")
     parser.add_argument("--once", action="store_true", help="Run one search cycle and exit")
+    parser.add_argument(
+        "--refresh-profile",
+        action="store_true",
+        help="Refresh Naukri profile/resume visibility and exit",
+    )
     args = parser.parse_args()
 
     config = load_config()
@@ -651,6 +661,7 @@ def main() -> int:
 
         page.goto("https://www.naukri.com/mnjuser/recommendedjobs", wait_until="domcontentloaded")
         page.wait_for_timeout(3000)
+        dismiss_naukri_modals(page)
 
         if is_logged_in(page):
             print("Using existing Chrome session — already logged in.")
@@ -662,10 +673,20 @@ def main() -> int:
             context.close()
             return 0
 
+        if args.refresh_profile:
+            refresh_profile_visibility(page, config, resume_path, DATA_DIR)
+            context.close()
+            return 0
+
         refresh_minutes = config["settings"]["refresh_interval_minutes"]
+        profile_refresh_hours = config["settings"].get("profile_refresh_interval_hours", 24)
         daily_start = datetime.now()
 
         while True:
+            if should_refresh_profile(DATA_DIR, profile_refresh_hours):
+                print("Running scheduled profile visibility refresh...", flush=True)
+                refresh_profile_visibility(page, config, resume_path, DATA_DIR)
+
             cycle_start = datetime.now()
             count = run_search_cycle(context, config, logger, resume_path)
             elapsed = datetime.now() - cycle_start
