@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+
+# Environment and secrets
+.env
+.env.*
+
+# Local config (personal email, paths) — use config.example.json as template
+config.json
+
+# Resume and personal files
+resume.pdf
+Resume.pdf
+resume.docx
+
+# Agent runtime data
+data/applications_log.csv
+data/applied_jobs.json
+browser_data/
+
+# Playwright
+playwright-report/
+test-results/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Logs
+*.log
