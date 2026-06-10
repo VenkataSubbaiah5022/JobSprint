@@ -3,6 +3,13 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+# Only these statuses block re-processing the same job on future cycles.
+BLOCK_RETRY_STATUSES = frozenset({
+    "applied",
+    "already_applied",
+    "external_redirect",
+})
+
 
 class ApplicationLogger:
     def __init__(self, data_dir: Path):
@@ -38,6 +45,20 @@ class ApplicationLogger:
     def is_duplicate(self, job_id: str, company: str, role: str) -> bool:
         return self.job_key(job_id, company, role) in self.applied
 
+    def count_applied_today(self) -> int:
+        if not self.csv_path.exists():
+            return 0
+        today = datetime.now().strftime("%Y-%m-%d")
+        count = 0
+        with self.csv_path.open(encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if not row.get("Date", "").startswith(today):
+                    continue
+                if row.get("Status") == "applied":
+                    count += 1
+        return count
+
     def log_application(
         self,
         company: str,
@@ -46,10 +67,15 @@ class ApplicationLogger:
         status: str,
         match_score: float,
         job_id: str = "",
+        *,
+        block_retry: bool | None = None,
     ) -> None:
         key = self.job_key(job_id, company, role)
-        self.applied.add(key)
-        self._save_applied()
+        if block_retry is None:
+            block_retry = status in BLOCK_RETRY_STATUSES
+        if block_retry:
+            self.applied.add(key)
+            self._save_applied()
 
         with self.csv_path.open("a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)

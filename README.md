@@ -79,6 +79,12 @@ python agent.py --refresh-profile
 
 Stop anytime with `Ctrl+C`.
 
+**Test without applying:**
+
+```powershell
+python agent.py --once --dry-run
+```
+
 ## Configuration
 
 Copy `config.example.json` to `config.json` and fill in your details:

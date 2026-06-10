@@ -22,7 +22,7 @@ def normalize(text: str) -> str:
 
 def is_application_complete(page: Page) -> bool:
     try:
-        if page.locator("#already-applied, text=Applied").count():
+        if page.locator("#already-applied").count() or page.locator("text=Applied").count():
             return True
         body = page.locator("body").inner_text(timeout=2000).lower()
         return any(marker in body for marker in SUCCESS_MARKERS)

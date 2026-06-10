@@ -23,6 +23,7 @@ from playwright.sync_api import (
 
 from logger import ApplicationLogger
 from matcher import calculate_match_score, should_apply_to_job
+from preflight import print_preflight_results, validate_startup
 from profile_refresh import (
     dismiss_naukri_modals,
     refresh_profile_visibility,
@@ -33,6 +34,7 @@ from questionnaire import (
     is_application_complete,
     is_job_unavailable,
 )
+from search_state import roles_for_cycle
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -63,7 +65,7 @@ def build_search_url(role: str, location: str, config: dict) -> str:
     loc_slug = slugify_role(location)
     return (
         f"https://www.naukri.com/{role_slug}-jobs-in-{loc_slug}"
-        f"?experience={exp}&jobAge={job_age}"
+        f"?k={quote_plus(role)}&experience={exp}&jobAge={job_age}"
     )
 
 
@@ -209,11 +211,22 @@ def apply_srp_filters(page: Page, config: dict) -> None:
             pass
 
 
+def scroll_job_listings(page: Page, scrolls: int = 3) -> None:
+    for _ in range(scrolls):
+        try:
+            page.keyboard.press("End")
+            page.wait_for_timeout(1200)
+        except Exception:
+            break
+
+
 def run_filtered_search(page: Page, role: str, location: str, config: dict) -> None:
     search_url = build_search_url(role, location, config)
     page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
     page.wait_for_timeout(3000)
+    dismiss_naukri_modals(page)
     apply_srp_filters(page, config)
+    scroll_job_listings(page, scrolls=config.get("settings", {}).get("listing_scrolls", 3))
 
 
 def is_logged_in(page: Page) -> bool:
@@ -344,10 +357,13 @@ def extract_job_card(card, *, srp_urls_only: bool = True) -> dict | None:
         return None
 
 
-def extract_jobs_from_listing(page: Page) -> list[dict]:
+def extract_jobs_from_listing(page: Page, config: dict | None = None) -> list[dict]:
     jobs: list[dict] = []
+    limit = 30
+    if config:
+        limit = config.get("settings", {}).get("jobs_per_search", 40)
     cards = page.locator(".srp-jobtuple-wrapper, .cust-job-tuple, article.jobTuple")
-    for i in range(min(cards.count(), 30)):
+    for i in range(min(cards.count(), limit)):
         job = extract_job_card(cards.nth(i), srp_urls_only=True)
         if job:
             jobs.append(job)
@@ -436,12 +452,20 @@ def extract_job_details(page: Page) -> dict:
 
 def fill_screening_questions(page: Page, config: dict) -> None:
     answers = config["screening_answers"]
+    candidate = config["candidate"]
     mappings = {
         r"experience|years of experience": answers["experience"],
-        r"current ctc|current salary": answers["current_ctc"],
+        r"current ctc|current salary|present ctc": answers["current_ctc"],
         r"expected ctc|expected salary|desired ctc": answers["expected_ctc"],
-        r"notice period": answers["notice_period"],
+        r"notice period|serving notice": answers["notice_period"],
         r"relocation|relocate|willing to relocate": answers["relocation"],
+        r"phone|mobile|contact|whatsapp": answers.get("phone", ""),
+        r"email": candidate.get("email", ""),
+        r"linkedin": candidate.get("linkedin", ""),
+        r"github": candidate.get("github", ""),
+        r"portfolio|website": candidate.get("portfolio", ""),
+        r"current location|current city": answers.get("current_location", ""),
+        r"full.?name|your name": candidate.get("name", ""),
     }
     inputs = page.locator("input[type='text'], input[type='number'], textarea, select")
     for i in range(inputs.count()):
@@ -456,12 +480,12 @@ def fill_screening_questions(page: Page, config: dict) -> None:
             placeholder = field.get_attribute("placeholder") or ""
             context = f"{label_text} {placeholder}".lower()
             for pattern, answer in mappings.items():
-                if re.search(pattern, context, re.I):
+                if answer and re.search(pattern, context, re.I):
                     tag = field.evaluate("el => el.tagName.toLowerCase()")
                     if tag == "select":
                         field.select_option(label=answer)
                     else:
-                        field.fill(answer)
+                        field.fill(str(answer))
                     break
         except Exception:
             continue
@@ -538,8 +562,9 @@ def apply_to_job(page: Page, context: BrowserContext, config: dict, resume_path:
         if file_input.count():
             file_input.first.set_input_files(str(resume_path))
 
-    fill_screening_questions(target, config)
-    complete_application_questionnaire(target, config)
+    for form_page in {page, target}:
+        fill_screening_questions(form_page, config)
+        complete_application_questionnaire(form_page, config)
 
     for submit_sel in [
         "button:has-text('Save and Apply')",
@@ -558,7 +583,7 @@ def apply_to_job(page: Page, context: BrowserContext, config: dict, resume_path:
                 pass
             break
 
-    if is_application_complete(target):
+    if is_application_complete(target) or is_application_complete(page):
         if popup_page is not page:
             popup_page.close()
         return "applied"
@@ -597,6 +622,7 @@ def process_job(
             status=f"skipped_low_match_{preview_score}",
             match_score=preview_score,
             job_id=job.get("job_id", ""),
+            block_retry=False,
         )
         print(f"[skipped_low_match_{preview_score}] {preview_score}% | {job.get('title')} @ {job.get('company')}", flush=True)
         return None
@@ -609,6 +635,7 @@ def process_job(
             status=f"dry_run_{preview_score}",
             match_score=preview_score,
             job_id=job.get("job_id", ""),
+            block_retry=False,
         )
         print(f"[dry_run] {preview_score}% | {job.get('title')} @ {job.get('company')}", flush=True)
         return "dry_run"
@@ -638,6 +665,7 @@ def process_job(
                 status = f"error_attempt_{attempt + 1}: {exc}"
                 job_page.wait_for_timeout(2000)
     finally:
+        block = status in ("applied", "already_applied", "external_redirect")
         logger.log_application(
             company=job.get("company", ""),
             role=job.get("title", ""),
@@ -645,6 +673,7 @@ def process_job(
             status=status,
             match_score=match_score,
             job_id=job.get("job_id", ""),
+            block_retry=block,
         )
         print(f"[{status}] {match_score}% | {job.get('title')} @ {job.get('company')}", flush=True)
         job_page.close()
@@ -664,13 +693,13 @@ def run_search_cycle(
     merge_jobs(queue, recommended)
 
     locations = config["locations"]
-    roles = config["target_roles"]
+    roles = roles_for_cycle(config, DATA_DIR)
     for role in roles:
         for location in locations:
             page = context.new_page()
             try:
                 run_filtered_search(page, role, location, config)
-                jobs = extract_jobs_from_listing(page)
+                jobs = extract_jobs_from_listing(page, config)
                 print(f"Found {len(jobs)} jobs for '{role}' in '{location}' (filtered)", flush=True)
                 merge_jobs(queue, jobs)
             except Exception as exc:
@@ -746,6 +775,12 @@ def create_browser_context(p: Playwright, config: dict) -> BrowserContext:
     )
 
 
+def release_browser(context: BrowserContext, config: dict) -> None:
+    if config.get("settings", {}).get("browser_mode") == "cdp":
+        return
+    context.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Autonomous Naukri Job Application Agent")
     parser.add_argument("--login", action="store_true", help="Only perform login and exit")
@@ -767,6 +802,10 @@ def main() -> int:
     resume_path = BASE_DIR / config["settings"]["resume_path"]
     BROWSER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+    errors, warnings = validate_startup(config, BASE_DIR, resume_path)
+    if not print_preflight_results(errors, warnings):
+        return 1
+
     print("=" * 60)
     print("Naukri Autonomous Job Application Agent")
     print(f"Candidate: {config['candidate']['name']}")
@@ -784,16 +823,16 @@ def main() -> int:
         if is_logged_in(page):
             print("Using existing Chrome session — already logged in.")
         elif not ensure_login(context, page, args.login):
-            context.close()
+            release_browser(context, config)
             return 1
 
         if args.login:
-            context.close()
+            release_browser(context, config)
             return 0
 
         if args.refresh_profile:
             refresh_profile_visibility(page, config, resume_path, DATA_DIR)
-            context.close()
+            release_browser(context, config)
             return 0
 
         refresh_minutes = config["settings"]["refresh_interval_minutes"]
@@ -810,7 +849,7 @@ def main() -> int:
                 context, config, logger, resume_path, dry_run=args.dry_run
             )
             elapsed = datetime.now() - cycle_start
-            total_today = len(logger.applied)
+            applied_today = logger.count_applied_today()
             if args.dry_run:
                 print(
                     f"Cycle complete (dry run): {stats['dry_run']} would apply | "
@@ -820,21 +859,21 @@ def main() -> int:
             else:
                 print(
                     f"Cycle complete: {stats['applied']} applied | "
-                    f"{stats['found']} found | Total tracked: {total_today} | Elapsed: {elapsed}",
+                    f"{stats['found']} found | Applied today: {applied_today} | Elapsed: {elapsed}",
                     flush=True,
                 )
 
             if args.once:
                 break
 
-            if total_today >= config["settings"]["daily_target_max"]:
+            if applied_today >= config["settings"]["daily_target_max"]:
                 print("Daily target reached. Sleeping until tomorrow...")
                 time.sleep(max(3600, (daily_start + timedelta(days=1) - datetime.now()).total_seconds()))
 
             print(f"Sleeping {refresh_minutes} minutes before next refresh...")
             time.sleep(refresh_minutes * 60)
 
-        context.close()
+        release_browser(context, config)
 
     return 0
 

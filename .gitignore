@@ -29,6 +29,7 @@ resume.docx
 data/applications_log.csv
 data/applied_jobs.json
 data/last_profile_refresh.txt
+data/search_state.json
 data/resume_variants/
 browser_data/
 

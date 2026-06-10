@@ -67,6 +67,11 @@
     "chrome_profile": "Default",
     "gemini_api_key": "",
     "use_recommended_feed": true,
+    "max_applies_per_cycle": 120,
+    "apply_delay_seconds": [3, 8],
+    "roles_per_cycle": 20,
+    "jobs_per_search": 40,
+    "listing_scrolls": 3,
     "profile_refresh_enabled": true,
     "profile_refresh_interval_hours": 24,
     "profile_refresh_touch_resume": true
