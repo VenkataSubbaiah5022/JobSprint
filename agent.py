@@ -22,6 +22,11 @@ from playwright.sync_api import (
 
 from logger import ApplicationLogger
 from matcher import calculate_match_score, should_apply_to_job
+from questionnaire import (
+    complete_application_questionnaire,
+    is_application_complete,
+    is_job_unavailable,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -416,8 +421,10 @@ def locate_apply_button(page: Page):
 
 
 def apply_to_job(page: Page, context: BrowserContext, config: dict, resume_path: Path) -> str:
-    if page.locator("text=Applied").count():
+    if page.locator("text=Applied").count() or page.locator("#already-applied").count():
         return "already_applied"
+    if is_job_unavailable(page):
+        return "job_unavailable"
 
     page.wait_for_timeout(1500)
     apply_btn = locate_apply_button(page)
@@ -461,28 +468,26 @@ def apply_to_job(page: Page, context: BrowserContext, config: dict, resume_path:
             file_input.first.set_input_files(str(resume_path))
 
     fill_screening_questions(target, config)
+    complete_application_questionnaire(target, config)
 
     for submit_sel in [
-        "button:has-text('Submit')",
         "button:has-text('Save and Apply')",
+        "button:has-text('Submit')",
         "button:has-text('Apply')",
         "button:has-text('Send')",
         "input[type='submit']",
     ]:
-        submit = target.locator(submit_sel)
+        submit = target.locator(submit_sel).filter(has_not_text="Applied")
         if submit.count():
-            submit.first.click()
-            target.wait_for_timeout(3000)
+            try:
+                submit.first.click(force=True, timeout=3000)
+                target.wait_for_timeout(2500)
+                complete_application_questionnaire(target, config)
+            except Exception:
+                pass
             break
 
-    success_markers = [
-        "successfully applied",
-        "application submitted",
-        "applied successfully",
-        "thank you for applying",
-    ]
-    page_text = target.locator("body").inner_text(timeout=3000).lower()
-    if any(marker in page_text for marker in success_markers) or target.locator("text=Applied").count():
+    if is_application_complete(target):
         if popup_page is not page:
             popup_page.close()
         return "applied"

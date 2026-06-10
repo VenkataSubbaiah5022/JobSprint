@@ -9,7 +9,9 @@ Autonomous Naukri job application agent. It searches fresh listings on [Naukri.c
 - Profile match scoring (role, skills, location, experience, salary)
 - Applies when match score ≥ 50% or title is a strong role match
 - Skips Senior, Lead, QA, DevOps-only, and other excluded roles
-- Fills screening questions (CTC, notice period, relocation)
+- Handles Naukri chatbot Q&A (radio + text) with rule-based answers from your profile
+- Optional Gemini AI fallback for unknown screening questions (`settings.gemini_api_key`)
+- Fills standard form fields (CTC, notice period, relocation, phone, links)
 - Prevents duplicate applications
 - Logs every attempt to CSV
 - Refreshes searches every 15 minutes until stopped
@@ -71,6 +73,12 @@ Stop anytime with `Ctrl+C`.
 
 ## Configuration
 
+Copy `config.example.json` to `config.json` and fill in your details:
+
+```powershell
+copy config.example.json config.json
+```
+
 Edit `config.json` to customize your profile and filters.
 
 | Section | Purpose |
@@ -114,14 +122,30 @@ Each job is scored out of 100:
 
 Exclude keywords are checked on the **job title** during listing preview, not on skill tags scraped from the card (avoids false 0% scores).
 
+## Screening & chatbot Q&A
+
+During apply, JobSprint handles two flows:
+
+1. **Standard forms** — CTC, notice period, relocation, file upload
+2. **Naukri chatbot** — multi-step radio and text questions with Save/Continue
+
+Answers are resolved in order:
+
+1. **Rules from `screening_answers` + `candidate`** — fast, free, deterministic (CTC, notice, links, yes/no)
+2. **Gemini AI** (optional) — only if `settings.gemini_api_key` is set and rules do not match
+
+Set your real phone in `screening_answers.phone` — many employers ask for it.
+
 ## Project structure
 
 ```
 JobSprint/
 ├── agent.py           # Main agent loop
 ├── matcher.py         # Match scoring logic
+├── questionnaire.py   # Chatbot Q&A (rules + optional AI)
 ├── logger.py          # Duplicate tracking and CSV logging
-├── config.json        # Profile and filter configuration
+├── config.json        # Profile and filter configuration (local, gitignored)
+├── config.example.json
 ├── start_chrome.ps1   # Launch Chrome with CDP on port 9222
 ├── requirements.txt
 ├── resume.pdf         # Your resume (add this)

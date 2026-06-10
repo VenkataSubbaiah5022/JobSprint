@@ -1,0 +1,68 @@
+{
+  "candidate": {
+    "name": "Your Full Name",
+    "email": "you@example.com",
+    "experience_years": 1,
+    "current_ctc_lpa": 9,
+    "expected_ctc_lpa": 12,
+    "notice_period": "Immediate",
+    "relocation": true,
+    "portfolio": "https://your-portfolio.vercel.app/",
+    "linkedin": "https://www.linkedin.com/in/your-profile/",
+    "github": "https://github.com/yourusername"
+  },
+  "target_roles": [
+    "Full Stack Developer",
+    "MERN Stack Developer",
+    "React Developer",
+    "Node.js Developer",
+    "Software Engineer"
+  ],
+  "skills": [
+    "React.js", "Next.js", "JavaScript", "TypeScript", "Node.js", "Express.js",
+    "Python", "MongoDB", "PostgreSQL", "REST APIs", "Docker", "AWS", "Git"
+  ],
+  "locations": ["Hyderabad", "Bangalore", "Bengaluru", "Remote"],
+  "filters": {
+    "experience_min": 0,
+    "experience_max": 3,
+    "candidate_experience_years": 1,
+    "salary_min_lpa": 8,
+    "salary_max_lpa": 18,
+    "max_posting_days": 7,
+    "freshness_options": ["Today", "Last 24 hours", "Last 1 day", "Last 3 days", "Last 7 days"],
+    "min_match_score": 50,
+    "strong_role_match_threshold": 80
+  },
+  "exclude_keywords": [
+    "senior", "lead", "manager", "qa", "quality assurance", "support",
+    "devops-only", "sap", "salesforce", "data analyst", "data scientist"
+  ],
+  "screening_answers": {
+    "experience": "1 Year",
+    "current_ctc": "9 LPA",
+    "expected_ctc": "12 LPA",
+    "notice_period": "Immediate",
+    "relocation": "Yes",
+    "phone": "+91XXXXXXXXXX",
+    "current_location": "Hyderabad",
+    "remote": "Yes",
+    "hybrid": "Yes",
+    "full_time": "Yes",
+    "bond": "No",
+    "default": "Yes"
+  },
+  "settings": {
+    "refresh_interval_minutes": 15,
+    "max_retries": 3,
+    "daily_target_min": 80,
+    "daily_target_max": 120,
+    "headless": false,
+    "resume_path": "resume.pdf",
+    "browser_mode": "cdp",
+    "chrome_cdp_url": "http://localhost:9222",
+    "chrome_user_data_dir": "C:\\Users\\YOUR_USER\\AppData\\Local\\Google\\Chrome\\User Data",
+    "chrome_profile": "Default",
+    "gemini_api_key": ""
+  }
+}
