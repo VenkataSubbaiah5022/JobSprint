@@ -11,7 +11,7 @@ Autonomous Naukri job application agent. It searches fresh listings on [Naukri.c
 - Applies when match score ≥ 50% or title is a strong role match
 - Skips Senior, Lead, QA, DevOps-only, and other excluded roles
 - Handles Naukri chatbot Q&A (radio + text) with rule-based answers from your profile
-- Optional Gemini AI fallback for unknown screening questions (`settings.gemini_api_key`)
+- Optional AI fallback for unknown screening questions (Groq first, then Gemini)
 - Fills standard form fields (CTC, notice period, relocation, phone, links)
 - Prevents duplicate applications
 - Logs every attempt to CSV
@@ -146,7 +146,9 @@ During apply, JobSprint handles two flows:
 Answers are resolved in order:
 
 1. **Rules from `screening_answers` + `candidate`** — fast, free, deterministic (CTC, notice, links, yes/no)
-2. **Gemini AI** (optional) — only if `settings.gemini_api_key` is set and rules do not match
+2. **Groq AI** (optional) — if `groq_api_key` is set and rules do not match
+3. **Gemini AI** (optional) — used when Groq is unavailable or rate-limited
+4. **Default** — `screening_answers.default` (usually "Yes")
 
 Set your real phone in `screening_answers.phone` — many employers ask for it.
 

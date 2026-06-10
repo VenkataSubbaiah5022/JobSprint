@@ -110,36 +110,94 @@ def pick_radio_index(answer: str, options: list[dict[str, str]]) -> int:
     return 0
 
 
-def ai_answer(question: str, options: list[dict[str, str]], config: dict) -> str | None:
+def _is_rate_limit_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(token in msg for token in ("rate", "quota", "limit", "429", "exceeded", "capacity"))
+
+
+def _build_ai_prompt(question: str, options: list[dict[str, str]], config: dict) -> str:
+    profile = {
+        "candidate": config.get("candidate", {}),
+        "screening_answers": config.get("screening_answers", {}),
+        "skills": config.get("skills", []),
+    }
+    options_text = "\n".join(
+        f"{i + 1}. {opt.get('label', '')}" for i, opt in enumerate(options)
+    )
+    prompt = (
+        "Answer this Naukri job application question using ONLY the candidate profile below. "
+        "Be concise (1-5 words). For multiple choice, reply with ONLY the option number.\n\n"
+        f"Profile: {profile}\n\nQuestion: {question}\n"
+    )
+    if options_text:
+        prompt += f"Options:\n{options_text}\n"
+    return prompt
+
+
+def _ask_groq(prompt: str, config: dict) -> str | None:
+    api_key = config.get("settings", {}).get("groq_api_key", "")
+    if not api_key:
+        return None
+    try:
+        from groq import Groq
+
+        model = config.get("settings", {}).get("groq_model", "llama-3.3-70b-versatile")
+        client = Groq(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Answer Naukri screening questions using only the profile. Be brief.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=80,
+            temperature=0.2,
+        )
+        return (response.choices[0].message.content or "").strip()
+    except Exception as exc:
+        label = "rate limit" if _is_rate_limit_error(exc) else "error"
+        print(f"[questionnaire] Groq {label}: {exc}", flush=True)
+        return None
+
+
+def _ask_gemini(prompt: str, config: dict) -> str | None:
     api_key = config.get("settings", {}).get("gemini_api_key", "")
     if not api_key:
         return None
-
     try:
         import google.generativeai as genai
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        profile = {
-            "candidate": config.get("candidate", {}),
-            "screening_answers": config.get("screening_answers", {}),
-            "skills": config.get("skills", []),
-        }
-        options_text = "\n".join(
-            f"{i + 1}. {opt.get('label', '')}" for i, opt in enumerate(options)
-        )
-        prompt = (
-            "Answer this Naukri job application question using ONLY the candidate profile below. "
-            "Be concise (1-5 words). For multiple choice, reply with ONLY the option number.\n\n"
-            f"Profile: {profile}\n\nQuestion: {question}\n"
-        )
-        if options_text:
-            prompt += f"Options:\n{options_text}\n"
+        model_name = config.get("settings", {}).get("gemini_model", "gemini-2.0-flash")
+        model = genai.GenerativeModel(model_name)
         response = model.generate_content(prompt)
         return (response.text or "").strip()
     except Exception as exc:
-        print(f"[questionnaire] AI fallback failed: {exc}", flush=True)
+        label = "rate limit" if _is_rate_limit_error(exc) else "error"
+        print(f"[questionnaire] Gemini {label}: {exc}", flush=True)
         return None
+
+
+def ai_answer(question: str, options: list[dict[str, str]], config: dict) -> str | None:
+    settings = config.get("settings", {})
+    order = settings.get("ai_fallback_order", ["groq", "gemini"])
+    providers = {
+        "groq": _ask_groq,
+        "gemini": _ask_gemini,
+    }
+
+    prompt = _build_ai_prompt(question, options, config)
+    for name in order:
+        provider = providers.get(name)
+        if not provider:
+            continue
+        answer = provider(prompt, config)
+        if answer:
+            print(f"[questionnaire] AI answered via {name}", flush=True)
+            return answer
+    return None
 
 
 def resolve_answer(question: str, options: list[dict[str, str]], config: dict) -> str:
