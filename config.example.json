@@ -50,6 +50,8 @@
     "hybrid": "Yes",
     "full_time": "Yes",
     "bond": "No",
+    "work_authorization": "Yes",
+    "visa": "No",
     "default": "Yes"
   },
   "settings": {
@@ -64,6 +66,7 @@
     "chrome_user_data_dir": "C:\\Users\\YOUR_USER\\AppData\\Local\\Google\\Chrome\\User Data",
     "chrome_profile": "Default",
     "gemini_api_key": "",
+    "use_recommended_feed": true,
     "profile_refresh_enabled": true,
     "profile_refresh_interval_hours": 24,
     "profile_refresh_touch_resume": true

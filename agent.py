@@ -293,43 +293,113 @@ def parse_posted_days(posted_text: str) -> int:
     return 999
 
 
+def job_id_from_href(href: str) -> str:
+    for pattern in (
+        r"-(\d{8,})(?:\?|$)",
+        r"job-listings-(\d+)",
+        r"job-details/(\d+)",
+        r"/(\d{9,})",
+    ):
+        match = re.search(pattern, href)
+        if match:
+            return match.group(1)
+    return href
+
+
+def extract_job_card(card, *, srp_urls_only: bool = True) -> dict | None:
+    try:
+        title_el = card.locator("a.title, .title, h2 a, a[href*='job']").first
+        title = title_el.inner_text(timeout=2000).strip()
+        href = title_el.get_attribute("href") or ""
+        if not title:
+            return None
+        if srp_urls_only and "job-listings" not in href:
+            return None
+        if not href:
+            return None
+
+        company = safe_card_text(card, ".comp-name, .companyInfo .comp-name, .company")
+        location = safe_card_text(card, ".locWdth, .locationsContainer, .location, .loc")
+        exp = safe_card_text(card, ".expwdth, .experience, .exp")
+        salary = safe_card_text(card, ".sal, .salary")
+        posted = safe_card_text(card, ".job-post-day, .type, .tuple-posted-date")
+        snippet = safe_card_text(card, ".job-desc, .row3, .tags-gt")
+        skills = safe_card_text(card, ".tags-gt, .tag, [class*='tag']")
+        url = href if href.startswith("http") else f"https://www.naukri.com{href}"
+        return {
+            "title": title,
+            "company": company,
+            "location": location,
+            "experience": exp,
+            "salary": salary,
+            "posted": posted,
+            "url": url,
+            "job_id": job_id_from_href(href),
+            "description": "",
+            "listing_snippet": f"{snippet} {skills}",
+            "skills": skills,
+        }
+    except Exception:
+        return None
+
+
 def extract_jobs_from_listing(page: Page) -> list[dict]:
     jobs: list[dict] = []
     cards = page.locator(".srp-jobtuple-wrapper, .cust-job-tuple, article.jobTuple")
-    count = cards.count()
-    for i in range(min(count, 30)):
-        card = cards.nth(i)
-        try:
-            title_el = card.locator("a.title, .title, h2 a").first
-            title = title_el.inner_text(timeout=2000).strip()
-            href = title_el.get_attribute("href") or ""
-            if not title or "job-listings" not in href:
-                continue
-            company = safe_card_text(card, ".comp-name, .companyInfo .comp-name, .company")
-            location = safe_card_text(card, ".locWdth, .locationsContainer, .location, .loc")
-            exp = safe_card_text(card, ".expwdth, .experience, .exp")
-            salary = safe_card_text(card, ".sal, .salary")
-            posted = safe_card_text(card, ".job-post-day, .type, .tuple-posted-date")
-            snippet = safe_card_text(card, ".job-desc, .row3, .tags-gt")
-            skills = safe_card_text(card, ".tags-gt, .tag, [class*='tag']")
-            job_id_match = re.search(r"-(\d{8,})(?:\?|$)", href) or re.search(r"job-listings-(\d+)", href)
-            job_id = job_id_match.group(1) if job_id_match else href
-            jobs.append({
-                "title": title,
-                "company": company,
-                "location": location,
-                "experience": exp,
-                "salary": salary,
-                "posted": posted,
-                "url": href if href.startswith("http") else f"https://www.naukri.com{href}",
-                "job_id": job_id,
-                "description": "",
-                "listing_snippet": f"{snippet} {skills}",
-                "skills": skills,
-            })
-        except Exception:
-            continue
+    for i in range(min(cards.count(), 30)):
+        job = extract_job_card(cards.nth(i), srp_urls_only=True)
+        if job:
+            jobs.append(job)
     return jobs
+
+
+def extract_jobs_from_recommended(page: Page) -> list[dict]:
+    """Parse Naukri's recommended-jobs feed (profile-matched listings)."""
+    jobs: list[dict] = []
+    cards = page.locator("article.jobTuple, .jobTuple, .srp-jobtuple-wrapper, .cust-job-tuple")
+    for i in range(min(cards.count(), 40)):
+        try:
+            card = cards.nth(i)
+            card.scroll_into_view_if_needed(timeout=2000)
+        except Exception:
+            pass
+        job = extract_job_card(cards.nth(i), srp_urls_only=False)
+        if job:
+            jobs.append(job)
+    return jobs
+
+
+def run_recommended_feed(
+    context: BrowserContext,
+    config: dict,
+    logger: ApplicationLogger,
+    resume_path: Path,
+) -> int:
+    if not config["settings"].get("use_recommended_feed", True):
+        return 0
+
+    applied_count = 0
+    page = context.new_page()
+    try:
+        page.goto(
+            "https://www.naukri.com/mnjuser/recommendedjobs",
+            wait_until="domcontentloaded",
+            timeout=45000,
+        )
+        page.wait_for_timeout(3000)
+        dismiss_naukri_modals(page)
+        jobs = extract_jobs_from_recommended(page)
+        print(f"Found {len(jobs)} jobs on recommended feed", flush=True)
+        for job in jobs:
+            before = len(logger.applied)
+            process_job(context, job, config, logger, resume_path)
+            if len(logger.applied) > before:
+                applied_count += 1
+    except Exception as exc:
+        print(f"Recommended feed failed: {exc}", flush=True)
+    finally:
+        page.close()
+    return applied_count
 
 
 def extract_job_details(page: Page) -> dict:
@@ -572,7 +642,7 @@ def process_job(
 
 
 def run_search_cycle(context: BrowserContext, config: dict, logger: ApplicationLogger, resume_path: Path) -> int:
-    applied_count = 0
+    applied_count = run_recommended_feed(context, config, logger, resume_path)
     locations = config["locations"]
     roles = config["target_roles"]
 

@@ -4,6 +4,7 @@ Autonomous Naukri job application agent. It searches fresh listings on [Naukri.c
 
 ## Features
 
+- Mines Naukri's recommended-jobs feed each cycle (profile-matched listings)
 - Searches 60+ target roles across Hyderabad, Bangalore, Bengaluru, and Remote
 - Applies experience (1 year) and freshness filters (Today / Last 1 day / Last 3 days)
 - Profile match scoring (role, skills, location, experience, salary)
